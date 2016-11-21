@@ -14,6 +14,9 @@ const char* pt_out_path = "./pt.out";
 
 const char* pt_dev = "/dev/pt-module";
 
+struct pt_config config;
+struct pt_packet_decoder* decoder;
+
 int main(int argc, char** argv) {
     // check pt start
     int pt_fd = open(pt_dev, O_RDONLY | O_CLOEXEC);
@@ -30,11 +33,15 @@ int main(int argc, char** argv) {
     } while(status == 2);
 
     // init pt
-    // struct pt_config config;
-    // pt_config_init(&config);
-    // pt_cpu_arrata(&config.errata, $config.cpu);
+    pt_config_init(&config);
+    pt_cpu_errata(&config.errata, &config.cpu);
+    decoder = pt_pkt_alloc_decoder(&config);
 
     void* buffer = malloc(4UL << 19);
+    if(buffer == NULL) {
+        printf("allocate buffer failed\n");
+        return -1;
+    }
     
     int pt_out = open(pt_out_path, O_RDONLY);
     if(pt_out == -1) {
@@ -51,6 +58,36 @@ int main(int argc, char** argv) {
     while(1) {
         // analysis pt
         printf("size: %lx\n", size);
+        if(size == 0)
+            continue;
+
+        config.begin = buffer;
+        config.end = buffer + size;
+
+        uint64_t offset = 0;
+        struct pt_packet packet;
+        while(1) {
+            pt_pkt_sync_forward(decoder);
+            pt_pkt_get_offset(decoder, &offset);
+            if(pt_pkt_next(decoder, &packet, sizeof(packet)) == -pte_eos)
+                break;
+            switch (packet.type) {
+                case ppt_tip: {
+                    printf("get tip packet\n");
+                    break;
+                }
+                case ppt_tnt_8: {
+                }
+                case ppt_tnt_64: {
+                    printf("get tnt_64 packet\n");
+                    break;
+                }
+                default: {
+                    break;
+                }
+            }
+        }
+        break;
 
         if(ioctl(pt_fd, PT_GET_STATUS, &status)) {
             perror("get pt status failed");
