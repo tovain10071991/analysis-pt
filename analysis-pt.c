@@ -1,163 +1,78 @@
-// gcc -o analysis-pt analysis-pt.c
-// ./analysis-pt <program> <args...>
-
 #include "pt-module.h"
-#define _GNU_SOURCE
-#include <assert.h>
-#include <stdio.h>
+
+#include <intel-pt.h>
+
 #include <stdlib.h>
+#include <stdio.h>
+#include <sys/types.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <errno.h>
-#include <sys/syscall.h>
-#include <sys/types.h>
-#include <sys/ptrace.h>
-#include <sys/wait.h>
-#include <sched.h>
 #include <sys/ioctl.h>
-#include <string.h>
-#include <sys/mman.h>
-
-const char* pt_module_path = "/home/user/Documents/test/pt_module/pt-module.ko";
-const char* module_param = "";
-const char* pt_dev = "/dev/pt-module";
 
 const char* pt_out_path = "./pt.out";
 
-int main(int argc, char** argv) {
-    assert(argc >= 2);
-    int ret;
-    ret = access(pt_module_path, F_OK);
-    if(ret) {
-        perror("access pt-module failed");
-        return -1;
-    }
-    // install module
-    int module_fd = open(pt_module_path, O_RDONLY);
-    if(module_fd == -1) {
-        perror("open pt-module.ko failed");
-        return -1;
-    }
-    ret = syscall(SYS_finit_module, module_fd, module_param, 0);
-    if(ret && errno != EEXIST) {
-        perror("install module failed");
-        return -1;
-    }
-    // start child
-    int pid = fork();
-    if(pid == -1) {
-        perror("fork failed");
-        return -1;
-    }
-    if(pid == 0) {
-        ptrace(PTRACE_TRACEME, 0, 0, 0);
-        switch(argc-2) {
-            case 0: {
-                execlp(argv[1], argv[1], NULL);
-                break;
-            }
-            case 1: {
-                execlp(argv[1], argv[1], argv[2], NULL);
-                break;
-            }
-            case 2: {
-                execlp(argv[1], argv[1], argv[2], argv[3], NULL);
-                break;
-            }
-            case 3: {
-                execlp(argv[1], argv[1], argv[2], argv[3], argv[4], NULL);
-                break;
-            }
-            case 4: {
-                execlp(argv[1], argv[1], argv[2], argv[3], argv[4], argv[5], NULL);
-                break;
-            }
-            default: {
-                printf("unsupported num of agrs: %d\n", argc-2);
-                return -1;
-            }
-        }
-    }
-    int status;
-    wait(&status);
-    assert(WIFSTOPPED(status));
-    // set cpu affinity
-    cpu_set_t cpu;
-    CPU_ZERO(&cpu);
-    CPU_SET(0, &cpu);
-    sched_setaffinity(pid, sizeof(cpu_set_t), &cpu);
+const char* pt_dev = "/dev/pt-module";
 
+int main(int argc, char** argv) {
+    // check pt start
     int pt_fd = open(pt_dev, O_RDONLY | O_CLOEXEC);
     if(pt_fd == -1) {
         perror("open pt_dev failed");
         return -1;
     }
+    int status = 0;
+    do {
+        if(ioctl(pt_fd, PT_GET_STATUS, &status)) {
+            perror("get pt status failed");
+            return -1;
+        }
+    } while(status == 2);
 
-    void* pt_info = mmap(NULL, 4UL << 19, PROT_READ, MAP_PRIVATE, pt_fd, 0);
-    if(!pt_info) {
-        perror("mmap failed");
+    // init pt
+    // struct pt_config config;
+    // pt_config_init(&config);
+    // pt_cpu_arrata(&config.errata, $config.cpu);
+
+    void* buffer = malloc(4UL << 19);
+    
+    int pt_out = open(pt_out_path, O_RDONLY);
+    if(pt_out == -1) {
+        perror("open pt.out failed");
         return -1;
     }
-
-    int pt_out = open(pt_out_path, O_RDWR|O_CREAT | O_TRUNC);
-
-    if(ioctl(pt_fd, PT_SET_PID, pid)) {
-        perror("set pid failed");
+    struct stat st;
+    off_t size;
+    if(fstat(pt_out, &st) == -1) {
+        perror("open pt.out failed");
         return -1;
     }
-    if(ioctl(pt_fd, PT_SET_STATUS, 1)) {
-        perror("start pt failed");
-        return -1;
-    }
-
+    size = st.st_size;
     while(1) {
-        ptrace(PTRACE_CONT, pid, 0, 0);
-        waitpid(pid, &status, 0);
-        if(WIFSIGNALED(status)) {
-            printf("child receives signal: %s\n", strsignal(WTERMSIG(status)));
+        // analysis pt
+        printf("size: %lx\n", size);
+
+        if(ioctl(pt_fd, PT_GET_STATUS, &status)) {
+            perror("get pt status failed");
+            return -1;
         }
-        if(WIFSTOPPED(status)) {
-            printf("child is stopped: %s\n", strsignal(WSTOPSIG(status)));
-            if(WSTOPSIG(status) == SIGTRAP) {
-                printf("reach here, cache pt info\n");
-                unsigned long buffer_size;
-                if(ioctl(pt_fd, PT_GET_SIZE, &buffer_size)) {
-                    perror("get buffer size failed");
-                    goto end;
-                }
-                ssize_t size = write(pt_out, pt_info, buffer_size);
-                if(size != buffer_size) {
-                    printf("write pt info only: 0x%lx(buffer_size: 0x%lx)\n", size, buffer_size);
-                    goto end;
-                }
-                if(ioctl(pt_fd, PT_SET_STATUS, 1)) {
-                    perror("start pt failed");
-                    goto end;
-                }
-            }
-        }
-        else if(WIFEXITED(status)) {
-            printf("child is exited: %d\n", WEXITSTATUS(status));
+        if(status == 2)
             break;
+        do {
+            if(fstat(pt_out, &st) == -1) {
+                perror("open pt.out failed");
+                return -1;
+            }
+        } while(st.st_size == size);
+        size = st.st_size;
+    }
+    do {
+        if(fstat(pt_out, &st) == -1) {
+            perror("open pt.out failed");
+            return -1;
         }
-    }
-end:
-    if(ioctl(pt_fd, PT_SET_STATUS, 0)) {
-        perror("stop pt failed");
-        return -1;
-    }
-    unsigned long buffer_size;
-    if(ioctl(pt_fd, PT_GET_SIZE, &buffer_size)) {
-        perror("get buffer size failed");
-        return -1;
-    }
-    ssize_t size = write(pt_out, pt_info, buffer_size);
-    if(size != buffer_size) {
-        printf("write pt info only: 0x%lx(buffer_size: 0x%lx)\n", size, buffer_size);
-        return -1;
-    }
-    ptrace(PTRACE_DETACH, pid, 0, 0);
-    wait(&status);
-    printf("reach here\n");
+    } while(st.st_size == size);
+    size = st.st_size;
+    printf("size: %lx\n", size);
     return 0;
 }
